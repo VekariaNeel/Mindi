@@ -278,6 +278,20 @@ io.on("connection", (socket) => {
     broadcastLobby(roomCode);
   });
 
+
+  // ── END ROOM (leader dissolves the room entirely) ────────────
+  socket.on("end_room", ({ roomCode }) => {
+    const room = getRoom(roomCode);
+    if (!room) return;
+    const player = Object.values(room.players).find(p => p.socketId === socket.id);
+    if (!player?.isLeader) return socket.emit("error", "Only leader can end room");
+    // Notify everyone then delete the room
+    io.to(roomCode).emit("room_ended", { message: "The leader has ended the room." });
+    // Remove from rooms map
+    const { rooms } = require("./roomManager");
+    delete rooms[roomCode];
+  });
+
   // ── CHAT ─────────────────────────────────────────────────────
   socket.on("chat", ({ roomCode, message }) => {
     if (!message?.trim()) return;
