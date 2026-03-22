@@ -19,48 +19,54 @@ const SUIT_COLOR = { "♥":"#e05c5c","♦":"#e05c5c","♠":"#1a1a2e","♣":"#1a1
 const RED_SUITS  = ["♥","♦"];
 
 // ── WON PILE ──────────────────────────────────────────────────
-// Shows stacked card backs + all tens face-up on top, side by side
-function WonPile({ cards, teamLabel, teamColor }) {
-  const tens   = (cards||[]).filter(c => c.rank === "10");
-  const others = (cards||[]).filter(c => c.rank !== "10");
-  const tricksWon = Math.floor((cards||[]).length / 4);
+// One card-back per trick won.
+// If a trick had tens, those tens are shown half-overlapped face-up
+// on top of that trick's card-back, suit visible on each.
+function WonPile({ cards, teamLabel, teamColor, n }) {
+  const cardsPerTrick = n || 4;
+  // Group cards into tricks (each group of n cards = 1 trick)
+  const tricks = [];
+  const allCards = cards || [];
+  for (let i = 0; i < allCards.length; i += cardsPerTrick) {
+    tricks.push(allCards.slice(i, i + cardsPerTrick));
+  }
+  const totalTens = allCards.filter(c => c.rank === "10").length;
 
   return (
     <div className="wonpile">
       <div className="wonpile-header" style={{ color: teamColor }}>
         {teamLabel}
-        <span className="wonpile-score">{tens.length}🔟 · {tricksWon}T</span>
+        <span className="wonpile-score">{totalTens}🔟 · {tricks.length}T</span>
       </div>
 
-      {(!cards || cards.length === 0) ? (
+      {tricks.length === 0 ? (
         <div className="wonpile-empty">No tricks yet</div>
       ) : (
-        <div className="wonpile-body">
-          {/* Tens — all visible face-up, side by side */}
-          {tens.length > 0 && (
-            <div className="wonpile-tens">
-              {tens.map((card, i) => (
-                <div key={i} className="wonpile-ten"
-                  style={{ color: RED_SUITS.includes(card.suit) ? "#c0392b" : "#111" }}>
-                  <span className="wt-rank">{card.rank}</span>
-                  <span className="wt-suit">{card.suit}</span>
-                </div>
-              ))}
-            </div>
-          )}
-
-          {/* Non-tens — simple stacked backs */}
-          {others.length > 0 && (
-            <div className="wonpile-backs">
-              {Array.from({ length: Math.min(others.length, 8) }).map((_, i) => (
-                <div key={i} className="wonpile-back"
-                  style={{ marginLeft: i === 0 ? 0 : -14, zIndex: i }} />
-              ))}
-              {others.length > 8 && (
-                <span className="wonpile-extra">+{others.length - 8}</span>
-              )}
-            </div>
-          )}
+        <div className="wonpile-tricks-row">
+          {tricks.map((trick, ti) => {
+            const tens = trick.filter(c => c.rank === "10");
+            return (
+              <div key={ti} className="wonpile-trick-slot">
+                {/* Card back = one trick */}
+                <div className="wonpile-trick-back" />
+                {/* Tens half-overlapped face-up on top */}
+                {tens.length > 0 && (
+                  <div className="wonpile-trick-tens">
+                    {tens.map((card, ki) => (
+                      <div key={ki} className="wonpile-trick-ten"
+                        style={{
+                          marginLeft: ki === 0 ? 0 : -10,
+                          zIndex: ki + 1,
+                          color: RED_SUITS.includes(card.suit) ? "#c0392b" : "#111"
+                        }}>
+                        <span className="wtt-suit">{card.suit}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })}
         </div>
       )}
     </div>
@@ -111,6 +117,8 @@ export default function Game({ session, playerNames, onGameOver }) {
   const [hukumReveal, setHukumReveal]       = useState(null);
   const [hukumCountdown, setHukumCountdown] = useState(5);
   const [showEndConfirm, setShowEndConfirm] = useState(false);
+  const [chatOpen, setChatOpen]             = useState(false);
+  const [unread, setUnread]                 = useState(false);
   const chatRef      = useRef();
   const countdownRef = useRef();
 
@@ -134,7 +142,10 @@ export default function Game({ session, playerNames, onGameOver }) {
     socket.on("player_disconnected", d  => setPaused(`Waiting for ${d.playerName} to reconnect...`));
     socket.on("player_reconnected",  d  => { setPaused(null); setEvent({ type:"info", msg:`${d.playerName} reconnected!` }); setTimeout(()=>setEvent(null),2000); });
     socket.on("game_over",    onGameOver);
-    socket.on("chat_message", msg => setChatMessages(prev => [...prev.slice(-99), msg]));
+    socket.on("chat_message", msg => {
+      setChatMessages(prev => [...prev.slice(-99), msg]);
+      setChatOpen(prev => { if (!prev) setUnread(true); return prev; });
+    });
     return () => {
       ["game_state","game_event","hukum_triggered","game_paused",
        "player_disconnected","player_reconnected","game_over","chat_message"]
@@ -152,6 +163,8 @@ export default function Game({ session, playerNames, onGameOver }) {
     socket.emit("play_card", { roomCode: session.roomCode, card: selected });
     setSelected(null);
   };
+
+  const openChat = () => { setChatOpen(true); setUnread(false); };
 
   const sendChat = () => {
     if (!chatMsg.trim()) return;
@@ -300,13 +313,13 @@ export default function Game({ session, playerNames, onGameOver }) {
               );
             })}
 
-            {/* Won piles — Team A left, Team B right of table */}
-            <div className="wonpiles-row">
-              <WonPile cards={wonCards.A} teamLabel="Team A" teamColor="var(--blue)" />
-              <WonPile cards={wonCards.B} teamLabel="Team B" teamColor="var(--green)" />
-            </div>
-
           </div>
+        </div>
+
+        {/* Won piles — BELOW the table, outside table-scene to avoid overlap */}
+        <div className="wonpiles-row">
+          <WonPile cards={wonCards.A} teamLabel="Team A" teamColor="var(--blue)" n={n} />
+          <WonPile cards={wonCards.B} teamLabel="Team B" teamColor="var(--green)" n={n} />
         </div>
 
         {/* ── RIGHT PANEL ── */}
@@ -356,6 +369,65 @@ export default function Game({ session, playerNames, onGameOver }) {
               <button className="game-chat-send" onClick={sendChat}>↑</button>
             </div>
           </div>
+        </div>
+      </div>
+
+      {/* ── MOBILE HAND PANEL (shown only on mobile via CSS) ── */}
+      {!isSpectator && (
+        <div className="mobile-hand-panel">
+          <div className="mobile-hand-header">
+            <span className="mobile-hand-title">
+              {isMyTurn ? "Your Turn — Pick a Card" : "Your Hand"}
+            </span>
+            <span style={{fontSize:"12px",color:"var(--muted)"}}>
+              {myHand.length} cards
+            </span>
+          </div>
+          <div className="mobile-hand-cards">
+            {myHand.map(card => (
+              <Card key={card.id} card={card} size="md"
+                selected={selected?.id === card.id}
+                disabled={!isMyTurn || !legal.find(c => c.id === card.id)}
+                onClick={() => setSelected(selected?.id === card.id ? null : card)} />
+            ))}
+          </div>
+          {isMyTurn && selected && (
+            <button className="mobile-play-btn" onClick={playCard}>
+              Play {selected.rank}{selected.suit}
+            </button>
+          )}
+          {!isMyTurn && (
+            <div className="mobile-wait-turn">
+              Waiting for <strong>{currentTurnName}</strong>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── MOBILE CHAT BUTTON ── */}
+      <button className={`mobile-chat-btn${unread ? " has-unread" : ""}`}
+        onClick={openChat} aria-label="Open chat">
+        💬
+      </button>
+
+      {/* ── MOBILE CHAT DRAWER ── */}
+      <div className={`mobile-chat-drawer${chatOpen ? " open" : ""}`}>
+        <div className="mobile-chat-drawer-header">
+          <span className="mobile-chat-drawer-title">Chat</span>
+          <button className="mobile-chat-close" onClick={() => setChatOpen(false)}>✕</button>
+        </div>
+        <div className="mobile-chat-messages" ref={chatRef}>
+          {chatMessages.map((m,i) => (
+            <div key={i} className="chat-msg">
+              <span className="chat-msg-name">{m.senderName}: </span>{m.message}
+            </div>
+          ))}
+        </div>
+        <div className="mobile-chat-input-row">
+          <input className="mobile-chat-input" placeholder="Message..." value={chatMsg}
+            onChange={e => setChatMsg(e.target.value)}
+            onKeyDown={e => e.key === "Enter" && sendChat()} />
+          <button className="mobile-chat-send" onClick={sendChat}>↑</button>
         </div>
       </div>
     </div>

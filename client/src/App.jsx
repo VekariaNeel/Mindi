@@ -43,7 +43,21 @@ export default function App() {
       setGameStartData(null);
       setPage("lobby");
     });
-    return () => socket.off("return_to_lobby");
+    // Room ended by leader — kick everyone home
+    socket.on("room_ended", () => {
+      localStorage.removeItem("mindi_token");
+      localStorage.removeItem("mindi_name");
+      localStorage.removeItem("mindi_leader");
+      socket.disconnect();
+      setSession(null);
+      setGameStartData(null);
+      setGameResult(null);
+      setPage("home");
+    });
+    return () => {
+      socket.off("return_to_lobby");
+      socket.off("room_ended");
+    };
   }, []);
 
   const handleJoined = (data) => {

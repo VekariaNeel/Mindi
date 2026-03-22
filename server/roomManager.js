@@ -164,4 +164,5 @@ module.exports = {
   createRoom, joinRoom, joinAsSpectator,
   reconnectPlayer, disconnectPlayer, assignTeams,
   addChatMessage, getRoom, getRoomPlayers,
+  rooms,
 };

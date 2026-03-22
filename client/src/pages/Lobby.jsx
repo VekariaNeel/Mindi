@@ -7,6 +7,7 @@ export default function Lobby({ session, onGameStart }) {
   const [chatMsg, setChatMsg] = useState("");
   const [error, setError] = useState("");
   const [copied, setCopied] = useState(false);
+  const [showEndRoom, setShowEndRoom] = useState(false);
   const chatRef = useRef();
 
   useEffect(() => {
@@ -45,6 +46,11 @@ export default function Lobby({ session, onGameStart }) {
     setSelected([]);
   };
 
+  const handleEndRoom = () => {
+    socket.emit("end_room", { roomCode: session.roomCode });
+    setShowEndRoom(false);
+  };
+
   const sendChat = () => {
     if (!chatMsg.trim()) return;
     socket.emit("chat", { roomCode: session.roomCode, message: chatMsg.trim() });
@@ -72,8 +78,30 @@ export default function Lobby({ session, onGameStart }) {
           <button className="lobby-share-btn" onClick={shareLink}>
             {copied ? <span className="copied-text">Copied! ✓</span> : "📋 Copy Invite Link"}
           </button>
+          {session.isLeader && (
+            <button className="lobby-end-room-btn" onClick={() => setShowEndRoom(true)}>
+              End Room
+            </button>
+          )}
         </div>
       </div>
+
+      {/* End Room Confirm Modal */}
+      {showEndRoom && (
+        <div className="modal-overlay" onClick={() => setShowEndRoom(false)}>
+          <div className="modal-card" onClick={e => e.stopPropagation()}>
+            <div className="modal-title" style={{ fontSize:"20px" }}>End Room?</div>
+            <p style={{ color:"var(--muted)", fontSize:"14px", marginBottom:"20px" }}>
+              This will remove all players from the room. Everyone will be sent back to the home screen.
+            </p>
+            <div style={{ display:"flex", gap:"10px" }}>
+              <button className="modal-close-btn" style={{ flex:1 }} onClick={() => setShowEndRoom(false)}>Cancel</button>
+              <button className="modal-close-btn" style={{ flex:1, background:"rgba(224,92,92,0.15)", borderColor:"rgba(224,92,92,0.3)", color:"var(--red)" }}
+                onClick={handleEndRoom}>End Room</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Players */}
       <div className="lobby-section">
