@@ -2,345 +2,321 @@ const express = require("express");
 const { createServer } = require("http");
 const { Server } = require("socket.io");
 const cors = require("cors");
-const rm = require("./roomManager");
-const { initGame, playCard, getCurrentTurnId, getLegalCards } = require("./gameEngine");
+
+const {
+  createRoom, joinRoom, joinAsSpectator,
+  reconnectPlayer, disconnectPlayer, assignTeams,
+  addChatMessage, getRoom, getRoomPlayers,
+} = require("./roomManager");
+
+const {
+  initGame, processPlay, getCurrentTurn,
+  checkHukumTrigger, sanitizeForPlayer, sanitizeForSpectator,
+} = require("./gameEngine");
 
 const app = express();
-app.use(cors());
+app.use(cors({ origin: "*" }));
 app.use(express.json());
-
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
   cors: { origin: "*", methods: ["GET", "POST"] },
 });
 
-// ─── REST ─────────────────────────────────────────────────────────────────────
+// ── HEALTH ────────────────────────────────────────────────────
 app.get("/health", (_, res) => res.json({ ok: true }));
 
-app.post("/room/create", (req, res) => {
-  const { name, playerLimit } = req.body;
-  if (!name || !playerLimit) return res.status(400).json({ error: "Missing fields" });
-  const n = parseInt(playerLimit);
-  if (isNaN(n) || n < 4 || n % 2 !== 0) return res.status(400).json({ error: "Invalid player limit" });
-  const result = rm.createRoom(name, n);
-  res.json(result);
-});
+// ── HELPERS ───────────────────────────────────────────────────
+function broadcastGameState(roomCode) {
+  const room = getRoom(roomCode);
+  if (!room || !room.game) return;
 
-app.post("/room/join", (req, res) => {
-  const { roomCode, name } = req.body;
-  if (!roomCode || !name) return res.status(400).json({ error: "Missing fields" });
-  const result = rm.joinRoom(roomCode.toUpperCase(), name);
-  if (result.error) return res.status(400).json(result);
-  res.json(result);
-});
-
-app.post("/room/spectate", (req, res) => {
-  const { roomCode, name } = req.body;
-  if (!roomCode) return res.status(400).json({ error: "Missing room code" });
-  const result = rm.joinAsSpectator(roomCode.toUpperCase(), name);
-  if (result.error) return res.status(400).json(result);
-  res.json(result);
-});
-
-app.post("/room/name-reconnect", (req, res) => {
-  const { roomCode, name } = req.body;
-  const result = rm.nameReconnect(roomCode.toUpperCase(), name, null);
-  if (result.error) return res.status(400).json(result);
-  res.json({ token: result.token, playerId: result.player.id });
-});
-
-app.get("/room/:code", (req, res) => {
-  const room = rm.getRoom(req.params.code.toUpperCase());
-  if (!room) return res.status(404).json({ error: "Room not found" });
-  res.json(rm.publicRoom(room));
-});
-
-// ─── SOCKET ───────────────────────────────────────────────────────────────────
-io.on("connection", (socket) => {
-  console.log("Socket connected:", socket.id);
-
-  // ── Room Creation / Joining (socket-based) ────────────────────────────────
-  socket.on("create_room", ({ name, playerLimit }) => {
-    if (!name || !playerLimit) return socket.emit("error", "Missing fields");
-    const n = parseInt(playerLimit);
-    if (isNaN(n) || n < 4 || n % 2 !== 0) return socket.emit("error", "Invalid player limit");
-    const result = rm.createRoom(name, n);
-    // Bind socket to the new player
-    rm.setPlayerSocket(result.token, socket.id);
-    socket.join(result.code);
-    socket.emit("room_created", result);
-    io.to(result.code).emit("room_update", rm.publicRoom(rm.getRoom(result.code)));
-  });
-
-  socket.on("join_room", ({ roomCode, name }) => {
-    if (!roomCode || !name) return socket.emit("error", "Missing fields");
-    const result = rm.joinRoom(roomCode.toUpperCase(), name);
-    if (result.error) return socket.emit("error", result.error);
-    rm.setPlayerSocket(result.token, socket.id);
-    socket.join(result.code);
-    socket.emit("room_joined", result);
-    io.to(result.code).emit("room_update", rm.publicRoom(rm.getRoom(result.code)));
-  });
-
-  socket.on("join_spectator", ({ roomCode, name }) => {
-    if (!roomCode) return socket.emit("error", "Missing room code");
-    const result = rm.joinAsSpectator(roomCode.toUpperCase(), name);
-    if (result.error) return socket.emit("error", result.error);
-    rm.setPlayerSocket(result.token, socket.id);
-    socket.join(result.code);
-    socket.emit("spectator_joined", result);
-    io.to(result.code).emit("room_update", rm.publicRoom(rm.getRoom(result.code)));
-  });
-
-  // ── Auth / Reconnect ──────────────────────────────────────────────────────
-  socket.on("auth", ({ token }) => {
-    const ref = rm.setPlayerSocket(token, socket.id);
-    if (!ref) return socket.emit("auth_failed", "Invalid token");
-
-    const { room, isSpectator, player } = ref;
-    socket.join(room.code);
-
-    // Resume game if it was paused for this player
-    if (!isSpectator && room.gameState && room.gameState.paused) {
-      if (room.gameState.pausedFor === player.id || room.players.every(p => p.connected)) {
-        room.gameState.paused = false;
-        room.gameState.pausedFor = null;
-      }
-    }
-
-    if (isSpectator) {
-      socket.emit("authed", {
-        isSpectator: true,
-        roomCode: room.code,
-        phase: room.phase,
-      });
-    } else {
-      socket.emit("authed", {
-        isSpectator: false,
-        playerId: player.id,
-        roomCode: room.code,
-        isLeader: player.isLeader,
-        playerName: player.name,
-        phase: room.phase, // lobby | playing | game_over
-      });
-    }
-
-    // Send current room state
-    io.to(room.code).emit("room_update", rm.publicRoom(room));
-
-    // If game is active, send game state
-    if (room.gameState && room.gameState.phase === "playing" && !room.gameState.paused) {
-      io.to(room.code).emit("game_resumed");
-      emitGameState(room, io);
+  // Each player gets their own sanitized state
+  Object.values(room.players).forEach(p => {
+    if (p.socketId) {
+      io.to(p.socketId).emit("game_state", sanitizeForPlayer(room.game, p.id));
     }
   });
 
-  // ── Lobby ─────────────────────────────────────────────────────────────────
-  socket.on("assign_teams", ({ token, assignments }) => {
-    const roomRef = rm.getRoomByToken(token);
-    if (!roomRef) return;
-    const leader = roomRef.players.find(p => p.token === token && p.isLeader);
-    if (!leader) return socket.emit("error", "Not the leader");
-    rm.assignTeams(roomRef.code, assignments);
-    const room = rm.getRoom(roomRef.code);
-    io.to(room.code).emit("room_update", rm.publicRoom(room));
-  });
-
-  socket.on("start_game", ({ token }) => {
-    const roomRef = rm.getRoomByToken(token);
-    if (!roomRef) return;
-    const room = rm.getRoom(roomRef.code);
-    const leader = room.players.find(p => p.token === token && p.isLeader);
-    if (!leader) return socket.emit("error", "Not the leader");
-
-    const activePlayers = room.players.filter(p => !p.isSpectator);
-    if (activePlayers.length !== room.playerLimit)
-      return socket.emit("error", "Not enough players");
-
-    const unassigned = activePlayers.filter(p => !p.team);
-    if (unassigned.length > 0)
-      return socket.emit("error", "All players must be assigned to a team");
-
-    const teamA = activePlayers.filter(p => p.team === "A");
-    const teamB = activePlayers.filter(p => p.team === "B");
-    if (teamA.length !== teamB.length)
-      return socket.emit("error", "Teams must be equal size");
-
-    room.gameState = initGame(activePlayers);
-    room.phase = "playing";
-    io.to(room.code).emit("game_started", { removedCards: room.gameState.removedCards });
-    emitGameState(room, io);
-  });
-
-  // ── Game ──────────────────────────────────────────────────────────────────
-  socket.on("play_card", ({ token, card }) => {
-    const roomRef = rm.getRoomByToken(token);
-    if (!roomRef) return socket.emit("error", "Invalid token");
-    const room = rm.getRoom(roomRef.code);
-    if (!room || !room.gameState) return;
-    if (room.gameState.paused) return socket.emit("error", "Game is paused");
-    if (room.gameState.phase !== "playing") return;
-
-    const player = room.players.find(p => p.token === token);
-    if (!player) return;
-
-    const result = playCard(room.gameState, player.id, card, room.players);
-    if (result.error) return socket.emit("error", result.error);
-
-    room.gameState = result.state;
-
-    // Broadcast last action to all
-    io.to(room.code).emit("action", room.gameState.lastAction);
-
-    if (room.gameState.phase === "game_over") {
-      room.phase = "game_over";
-      io.to(room.code).emit("game_over", {
-        winner: room.gameState.winner,
-        tensTaken: room.gameState.tensTaken,
-        tricksTaken: room.gameState.tricksTaken,
-      });
-    }
-
-    emitGameState(room, io);
-  });
-
-  socket.on("end_game_force", ({ token }) => {
-    const roomRef = rm.getRoomByToken(token);
-    if (!roomRef) return;
-    const room = rm.getRoom(roomRef.code);
-    const leader = room.players.find(p => p.token === token && p.isLeader);
-    if (!leader) return;
-    room.phase = "lobby";
-    room.gameState = null;
-    room.players.forEach(p => { p.team = null; p.seat = null; });
-    io.to(room.code).emit("game_ended_by_leader");
-    io.to(room.code).emit("room_update", rm.publicRoom(room));
-  });
-
-  socket.on("play_again", ({ token }) => {
-    const roomRef = rm.getRoomByToken(token);
-    if (!roomRef) return;
-    const room = rm.getRoom(roomRef.code);
-    const leader = room.players.find(p => p.token === token && p.isLeader);
-    if (!leader) return;
-    room.phase = "lobby";
-    room.gameState = null;
-    io.to(room.code).emit("back_to_lobby");
-    io.to(room.code).emit("room_update", rm.publicRoom(room));
-  });
-
-  // ── End Room (destroy) ─────────────────────────────────────────────────────
-  socket.on("end_room", ({ token }) => {
-    const roomRef = rm.getRoomByToken(token);
-    if (!roomRef) return;
-    const room = rm.getRoom(roomRef.code);
-    if (!room) return;
-    const leader = room.players.find(p => p.token === token && p.isLeader);
-    if (!leader) return socket.emit("error", "Not the leader");
-    io.to(room.code).emit("room_ended");
-    // Make all sockets leave the room
-    io.in(room.code).socketsLeave(room.code);
-    rm.destroyRoom(room.code);
-  });
-
-  // ── Chat ──────────────────────────────────────────────────────────────────
-  socket.on("chat", ({ token, message }) => {
-    const roomRef = rm.getRoomByToken(token);
-    if (!roomRef) return;
-    const room = rm.getRoom(roomRef.code);
-
-    let sender = room.players.find(p => p.token === token);
-    let senderName = sender ? sender.name : "Spectator";
-    let senderId = sender ? sender.id : token;
-
-    if (!sender) {
-      const spec = room.spectators.find(s => s.token === token);
-      if (spec) { senderName = spec.name; senderId = spec.id; }
-    }
-
-    const msg = rm.addChatMessage(room.code, senderId, senderName, message.slice(0, 200));
-    io.to(room.code).emit("chat_message", msg);
-  });
-
-  // ── Disconnect ────────────────────────────────────────────────────────────
-  socket.on("disconnect", () => {
-    const result = rm.disconnectPlayer(socket.id);
-    if (!result) return;
-    const { room, player, isSpectator, spectator } = result;
-
-    if (isSpectator) {
-      io.to(room.code).emit("room_update", rm.publicRoom(room));
-      return;
-    }
-
-    io.to(room.code).emit("player_disconnected", { playerId: player.id, name: player.name });
-    io.to(room.code).emit("room_update", rm.publicRoom(room));
-
-    if (room.gameState && room.gameState.paused) {
-      io.to(room.code).emit("game_paused", { playerId: player.id, name: player.name });
-    }
-  });
-});
-
-// ─── HELPERS ─────────────────────────────────────────────────────────────────
-function emitGameState(room, io) {
-  const gs = room.gameState;
-  if (!gs) return;
-
-  const currentTurnId = getCurrentTurnId(gs);
-
-  // Emit personalized state to each player
-  room.players.forEach(player => {
-    if (player.isSpectator) return;
-    const sock = io.sockets.sockets.get(player.socketId);
-    if (!sock) return;
-
-    const myHand = gs.hands[player.id] || [];
-    const myLegal = getLegalCards(gs, player.id);
-
-    sock.emit("game_state", {
-      phase: gs.phase,
-      paused: gs.paused,
-      pausedFor: gs.pausedFor,
-      sequence: gs.sequence,
-      hukumRevealed: gs.hukumRevealed,
-      hukumSuit: gs.hukumSuit,
-      hukumHolderId: gs.hukumHolderId,
-      isHukumHolder: gs.hukumHolderId === player.id,
-      currentTurnId,
-      isMyTurn: currentTurnId === player.id,
-      currentTrick: gs.currentTrick,
-      tricksTaken: gs.tricksTaken,
-      tensTaken: gs.tensTaken,
-      myHand,
-      myLegalCardIds: myLegal.map(c => c.id),
-      removedCards: gs.removedCards,
-      handSizes: Object.fromEntries(
-        Object.entries(gs.hands).map(([pid, h]) => [pid, h.length])
-      ),
-    });  // NOTE: hukumCard intentionally NOT sent — holder sees neutral badge only
-  });
-
-  // Spectators get full public state (no hands)
-  const spectatorState = {
-    phase: gs.phase,
-    paused: gs.paused,
-    hukumRevealed: gs.hukumRevealed,
-    hukumSuit: gs.hukumSuit,
-    currentTurnId,
-    currentTrick: gs.currentTrick,
-    tricksTaken: gs.tricksTaken,
-    tensTaken: gs.tensTaken,
-    handSizes: Object.fromEntries(
-      Object.entries(gs.hands).map(([pid, h]) => [pid, h.length])
-    ),
-  };
-
-  room.spectators.forEach(spec => {
-    const sock = io.sockets.sockets.get(spec.socketId);
-    if (sock) sock.emit("game_state", { ...spectatorState, isSpectator: true });
+  // Spectators get no hand info
+  Object.values(room.spectators).forEach(s => {
+    io.to(s.socketId).emit("game_state", sanitizeForSpectator(room.game));
   });
 }
 
+function broadcastLobby(roomCode) {
+  const room = getRoom(roomCode);
+  if (!room) return;
+  io.to(roomCode).emit("lobby_state", {
+    players: getRoomPlayers(roomCode),
+    phase: room.phase,
+    playerLimit: room.playerLimit,
+    teamA: room.teamA,
+    teamB: room.teamB,
+    chat: room.chat,
+  });
+}
+
+// ── SOCKET EVENTS ─────────────────────────────────────────────
+io.on("connection", (socket) => {
+  console.log("Connected:", socket.id);
+
+  // ── CREATE ROOM ──────────────────────────────────────────────
+  socket.on("create_room", ({ name, playerLimit }) => {
+    const n = parseInt(playerLimit);
+    if (!name?.trim()) return socket.emit("error", "Enter your name");
+    if (!n || n < 4 || n % 2 !== 0) return socket.emit("error", "Invalid player count");
+
+    const result = createRoom(name.trim(), n);
+    const room = getRoom(result.roomCode);
+    room.players[result.playerId].socketId = socket.id;
+    socket.join(result.roomCode);
+
+    socket.emit("room_created", {
+      roomCode: result.roomCode,
+      playerId: result.playerId,
+      token: result.token,
+    });
+    broadcastLobby(result.roomCode);
+  });
+
+  // ── JOIN ROOM ────────────────────────────────────────────────
+  socket.on("join_room", ({ roomCode, name }) => {
+    if (!name?.trim()) return socket.emit("error", "Enter your name");
+    if (!roomCode?.trim()) return socket.emit("error", "Enter room code");
+
+    const result = joinRoom(roomCode.trim().toUpperCase(), name.trim());
+    if (result.error) return socket.emit("error", result.error);
+
+    const room = getRoom(result.roomCode);
+    room.players[result.playerId].socketId = socket.id;
+    socket.join(result.roomCode);
+
+    socket.emit("room_joined", {
+      roomCode: result.roomCode,
+      playerId: result.playerId,
+      token: result.token,
+    });
+    broadcastLobby(result.roomCode);
+
+    const msg = addChatMessage(result.roomCode, "System", `${name.trim()} joined the room.`);
+    io.to(result.roomCode).emit("chat_message", msg);
+  });
+
+  // ── JOIN AS SPECTATOR ────────────────────────────────────────
+  socket.on("join_spectator", ({ roomCode, name }) => {
+    if (!roomCode?.trim()) return socket.emit("error", "Enter room code");
+
+    const code = roomCode.trim().toUpperCase();
+    const result = joinAsSpectator(code, socket.id, name || "Spectator");
+    if (result.error) return socket.emit("error", result.error);
+
+    socket.join(code);
+    socket.emit("spectator_joined", { roomCode: code });
+
+    // If game already in progress, send current state
+    const room = getRoom(code);
+    if (room?.game) {
+      socket.emit("game_state", sanitizeForSpectator(room.game));
+    }
+
+    broadcastLobby(code);
+    const msg = addChatMessage(code, "System", `${name || "A spectator"} is watching.`);
+    io.to(code).emit("chat_message", msg);
+  });
+
+  // ── RECONNECT ────────────────────────────────────────────────
+  socket.on("reconnect_player", ({ token }) => {
+    if (!token) return socket.emit("error", "No token");
+
+    const result = reconnectPlayer(token, socket.id);
+    if (result.error) return socket.emit("error", result.error);
+
+    const { roomCode, playerId, room } = result;
+    socket.join(roomCode);
+    socket.emit("reconnected", { roomCode, playerId });
+
+    if (room.phase === "playing" && room.game) {
+      socket.emit("game_state", sanitizeForPlayer(room.game, playerId));
+      broadcastGameState(roomCode);
+      io.to(roomCode).emit("player_reconnected", { playerName: result.player.name });
+    } else {
+      broadcastLobby(roomCode);
+    }
+  });
+
+  // ── ASSIGN TEAMS ─────────────────────────────────────────────
+  socket.on("assign_teams", ({ roomCode, teamA, teamB }) => {
+    const room = getRoom(roomCode);
+    if (!room) return socket.emit("error", "Room not found");
+
+    const player = Object.values(room.players).find(p => p.socketId === socket.id);
+    if (!player?.isLeader) return socket.emit("error", "Only leader can assign teams");
+
+    const result = assignTeams(roomCode, teamA, teamB);
+    if (result.error) return socket.emit("error", result.error);
+
+    broadcastLobby(roomCode);
+  });
+
+  // ── START GAME ───────────────────────────────────────────────
+  socket.on("start_game", ({ roomCode }) => {
+    const room = getRoom(roomCode);
+    if (!room) return socket.emit("error", "Room not found");
+
+    const player = Object.values(room.players).find(p => p.socketId === socket.id);
+    if (!player?.isLeader) return socket.emit("error", "Only leader can start");
+    if (!room.teamA.length || !room.teamB.length) return socket.emit("error", "Assign teams first");
+    if (room.teamA.length !== room.teamB.length) return socket.emit("error", "Teams must be equal size");
+    const unassigned = Object.values(room.players).filter(p => !p.team);
+    if (unassigned.length > 0) return socket.emit("error", `${unassigned.map(p=>p.name).join(", ")} not assigned to a team yet`);
+
+    const connected = Object.values(room.players).filter(p => p.connected).length;
+    if (connected < room.playerLimit) return socket.emit("error", `Waiting for all ${room.playerLimit} players`);
+
+    // Build playerNames map
+    const playerNames = Object.fromEntries(
+      Object.values(room.players).map(p => [p.id, p.name])
+    );
+
+    room.game = initGame(room.teamA, room.teamB);
+    room.phase = "playing";
+
+    io.to(roomCode).emit("game_started", {
+      playerNames,
+      hukumHolderName: room.players[room.game.hukumHolderId]?.name,
+      removedCards: room.game.removedCards,
+    });
+
+    broadcastGameState(roomCode);
+  });
+
+  // ── PLAY CARD ────────────────────────────────────────────────
+  socket.on("play_card", ({ roomCode, card }) => {
+    const room = getRoom(roomCode);
+    if (!room?.game) return socket.emit("error", "No active game");
+    if (room.phase === "paused") return socket.emit("error", "Game is paused");
+
+    const player = Object.values(room.players).find(p => p.socketId === socket.id);
+    if (!player) return socket.emit("error", "Player not found");
+
+    const currentTurn = getCurrentTurn(room.game);
+    if (currentTurn !== player.id) return socket.emit("error", "Not your turn");
+
+    const result = processPlay(room.game, player.id, card, player.name);
+    if (result.error) return socket.emit("error", result.error);
+
+    // Build playerNames for event broadcast
+    const playerNames = Object.fromEntries(
+      Object.values(room.players).map(p => [p.id, p.name])
+    );
+
+    // Broadcast the card played event to ALL
+    io.to(roomCode).emit("game_event", {
+      ...room.game.lastEvent,
+      playerNames,
+    });
+
+    // Game over
+    if (room.game.phase === "game_over") {
+      room.phase = "game_over";
+      io.to(roomCode).emit("game_over", {
+        winner: room.game.winner,
+        tens: room.game.tens,
+        tricks: room.game.tricks,
+      });
+      broadcastGameState(roomCode);
+      return;
+    }
+
+    // Check if HUKUM should trigger for the NEXT player BEFORE they play
+    const hukumTrigger = checkHukumTrigger(room.game);
+    if (hukumTrigger) {
+      // Broadcast hukum reveal to everyone immediately
+      io.to(roomCode).emit("hukum_triggered", {
+        ...hukumTrigger,
+        playerName: room.players[hukumTrigger.nextPlayerId]?.name || "",
+        playerNames,
+      });
+    }
+
+    broadcastGameState(roomCode);
+  });
+
+  // ── END GAME (leader force ends) ─────────────────────────────
+  socket.on("end_game", ({ roomCode }) => {
+    const room = getRoom(roomCode);
+    if (!room) return socket.emit("error", "Room not found");
+
+    const player = Object.values(room.players).find(p => p.socketId === socket.id);
+    if (!player?.isLeader) return socket.emit("error", "Only leader can end game");
+
+    room.phase = "game_over";
+    io.to(roomCode).emit("game_over", {
+      winner: null,
+      tens: room.game?.tens || { A: 0, B: 0 },
+      tricks: room.game?.tricks || { A: 0, B: 0 },
+      forcedEnd: true,
+      endedBy: player.name,
+    });
+  });
+
+  // ── PLAY AGAIN ───────────────────────────────────────────────
+  socket.on("play_again", ({ roomCode }) => {
+    const room = getRoom(roomCode);
+    if (!room) return;
+
+    const player = Object.values(room.players).find(p => p.socketId === socket.id);
+    if (!player?.isLeader) return socket.emit("error", "Only leader can restart");
+
+    room.game = null;
+    room.phase = "lobby";
+    room.teamA = [];
+    room.teamB = [];
+    Object.values(room.players).forEach(p => { p.team = null; });
+
+    io.to(roomCode).emit("return_to_lobby");
+    broadcastLobby(roomCode);
+  });
+
+  // ── CHAT ─────────────────────────────────────────────────────
+  socket.on("chat", ({ roomCode, message }) => {
+    if (!message?.trim()) return;
+    const room = getRoom(roomCode);
+    if (!room) return;
+
+    let senderName = "Spectator";
+    const player = Object.values(room.players).find(p => p.socketId === socket.id);
+    if (player) senderName = player.name;
+    else if (room.spectators[socket.id]) senderName = room.spectators[socket.id].name;
+
+    const msg = addChatMessage(roomCode, senderName, message.trim().slice(0, 200));
+    io.to(roomCode).emit("chat_message", msg);
+  });
+
+  // ── DISCONNECT ───────────────────────────────────────────────
+  socket.on("disconnect", () => {
+    console.log("Disconnected:", socket.id);
+    const result = disconnectPlayer(socket.id);
+    if (!result) return;
+
+    if (result.type === "spectator") {
+      broadcastLobby(result.roomCode);
+      return;
+    }
+
+    const { roomCode, playerName, room } = result;
+    io.to(roomCode).emit("player_disconnected", { playerName });
+
+    if (room.phase === "paused") {
+      io.to(roomCode).emit("game_paused", {
+        playerName,
+        message: `Waiting for ${playerName} to reconnect...`,
+      });
+    }
+
+    broadcastLobby(roomCode);
+  });
+});
+
 const PORT = process.env.PORT || 3001;
-httpServer.listen(PORT, () => console.log(`Mindi server running on port ${PORT}`));
+httpServer.listen(PORT, () => console.log(`✅ Mindi server running on port ${PORT}`));
