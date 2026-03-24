@@ -93,7 +93,7 @@ export default function Home({ onJoined }) {
         {tab==="create" && <>
           <div className="home-field">
             <label className="home-label">Your Name</label>
-            <input className="home-input" placeholder="e.g. Ahmed" value={name}
+            <input className="home-input" placeholder="e.g. Rahul" value={name}
               onChange={e=>setName(e.target.value)} onKeyDown={e=>e.key==="Enter"&&handleCreate()} />
           </div>
           <div className="home-field">
@@ -113,7 +113,7 @@ export default function Home({ onJoined }) {
         {tab==="join" && <>
           <div className="home-field">
             <label className="home-label">Your Name</label>
-            <input className="home-input" placeholder="e.g. Ahmed" value={name}
+            <input className="home-input" placeholder="e.g. Rahul" value={name}
               onChange={e=>setName(e.target.value)} />
           </div>
           <div className="home-field">
