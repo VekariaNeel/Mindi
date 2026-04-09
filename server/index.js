@@ -1,3 +1,4 @@
+require("dotenv").config();
 const express = require("express");
 const { createServer } = require("http");
 const { Server } = require("socket.io");
@@ -9,11 +10,12 @@ const {
 } = require("./gameEngine");
 
 const app = express();
-app.use(cors({ origin: "*" }));
+const origin = process.env.CLIENT_URL || "*";
+app.use(cors({ origin }));
 app.use(express.json());
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
-  cors: { origin: "*", methods: ["GET", "POST"] },
+  cors: { origin, methods: ["GET", "POST"] },
 });
 
 // ── STATE ─────────────────────────────────────────────────────
