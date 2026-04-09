@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import socket from "../socket";
 import Card from "../components/Card";
+import { auth } from "../firebase";
 
 // ── GAME LOGIC (UNTOUCHED) ────────────────────────────────────
 function getLegalCards(hand, currentTrick, hukumRevealed, hukumSuit, hukumJustRevealed=false) {
@@ -63,7 +64,7 @@ function WonPile({ cards, teamLabel, teamColor, n }) {
 }
 
 // ── PLAYER SEAT ───────────────────────────────────────────────
-function PlayerSeat({ name, angle, isMe, isCurrentTurn, cardCount, isHukumHolder, hukumRevealed, tableR, isSpectator }) {
+function PlayerSeat({ name, angle, isMe, isCurrentTurn, cardCount, isHukumHolder, hukumRevealed, tableR, isSpectator, isBot }) {
   const RAD  = Math.PI / 180;
   const seatR = tableR + 68;
   const x = Math.cos((angle - 90) * RAD) * seatR;
@@ -74,7 +75,7 @@ function PlayerSeat({ name, angle, isMe, isCurrentTurn, cardCount, isHukumHolder
       style={{ transform: `translate(calc(-50% + ${x}px), calc(-50% + ${y}px))` }}>
       <div className="pseat-name">
         {isCurrentTurn && <span className="pseat-dot" />}
-        <span className="pseat-label">{isMe ? `${name} (You)` : name}</span>
+        <span className="pseat-label">{isMe ? `${name} (You)` : name} {isBot && "🤖"}</span>
         {isHukumHolder && !hukumRevealed && <span className="pseat-hukum">🂠</span>}
       </div>
       {!isMe && !isSpectator && (
@@ -111,7 +112,7 @@ function ChatPanel({ messages, chatMsg, setChatMsg, onSend, chatRef }) {
 }
 
 // ── MAIN GAME ─────────────────────────────────────────────────
-export default function Game({ session, playerNames, onGameOver }) {
+export default function Game({ session, playerNames, onGameOver, onGoHome }) {
   const [gs, setGs]                         = useState(null);
   const [selected, setSelected]             = useState(null);
   const [event, setEvent]                   = useState(null);
@@ -123,6 +124,7 @@ export default function Game({ session, playerNames, onGameOver }) {
   const [showEndConfirm, setShowEndConfirm] = useState(false);
   const [chatOpen, setChatOpen]             = useState(false);
   const [unread, setUnread]                 = useState(false);
+  const [bots, setBots]                     = useState({});
   const chatRef      = useRef();
   const countdownRef = useRef();
 
@@ -142,6 +144,11 @@ export default function Game({ session, playerNames, onGameOver }) {
     socket.on("game_state",          s  => { setGs(s); setPaused(null); });
     socket.on("game_event",          ev => { setEvent(ev); setTimeout(() => setEvent(null), 2800); });
     socket.on("hukum_triggered",     ev => showHukumOverlay(ev.hukumCard, ev.nextPlayerName||ev.playerName, ev.hukumSuit));
+    socket.on("lobby_state",         data => {
+      const b = {};
+      (data.players || []).forEach(p => { if (p.isBot) b[p.id] = true; });
+      setBots(b);
+    });
     socket.on("game_paused",         d  => setPaused(d.message));
     socket.on("player_disconnected", d  => setPaused(`Waiting for ${d.playerName} to reconnect...`));
     socket.on("player_reconnected",  d  => {
@@ -156,7 +163,7 @@ export default function Game({ session, playerNames, onGameOver }) {
     });
     return () => {
       ["game_state","game_event","hukum_triggered","game_paused",
-       "player_disconnected","player_reconnected","game_over","chat_message"]
+       "player_disconnected","player_reconnected","game_over","chat_message","lobby_state"]
         .forEach(e => socket.off(e));
       clearInterval(countdownRef.current);
     };
@@ -178,6 +185,11 @@ export default function Game({ session, playerNames, onGameOver }) {
     if (!chatMsg.trim()) return;
     socket.emit("chat", { roomCode: session.roomCode, message: chatMsg.trim() });
     setChatMsg("");
+  };
+
+  const handleLeaveGame = () => {
+    socket.emit("leave_room", { roomCode: session.roomCode, uid: auth.currentUser?.uid });
+    if (onGoHome) onGoHome();
   };
 
   const formatEvent = ev => {
@@ -281,6 +293,7 @@ export default function Game({ session, playerNames, onGameOver }) {
         {session.isLeader && (
           <button className="end-game-btn" onClick={() => setShowEndConfirm(true)}>End Game</button>
         )}
+        <button className="end-game-btn" style={{background:"transparent", color:"var(--red)", borderColor:"var(--red)"}} onClick={handleLeaveGame}>Leave Game</button>
       </div>
 
       {paused && <div className="pause-banner">⏸ {paused}</div>}
@@ -324,7 +337,8 @@ export default function Game({ session, playerNames, onGameOver }) {
                 isMe={pid===session.playerId} isCurrentTurn={gs.currentTurn===pid}
                 cardCount={pid===session.playerId ? myHand.length : (gs.handSizes?.[pid]??0)}
                 isHukumHolder={pid===session.playerId && gs.isHukumHolder}
-                hukumRevealed={gs.hukumRevealed} tableR={TABLE_R} isSpectator={isSpectator} />
+                hukumRevealed={gs.hukumRevealed} tableR={TABLE_R} isSpectator={isSpectator}
+                isBot={bots[pid]} />
             ))}
           </div>
 
