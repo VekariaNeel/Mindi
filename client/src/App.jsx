@@ -27,11 +27,11 @@ export default function App() {
   // Reconnect on reload — only fires when auth is ready and there's a saved room
   useEffect(() => {
     if (!authLoaded || !user) return;
-    const mindiRoom = localStorage.getItem("mindi_room");
+    const mindiRoom = sessionStorage.getItem("mindi_room");
     if (!mindiRoom) return;
 
     const onReconnected = (data) => {
-      const isLeader = localStorage.getItem("mindi_leader") === "true";
+      const isLeader = sessionStorage.getItem("mindi_leader") === "true";
       setSession({ ...data, name: user.displayName, isLeader, role: "player" });
       // Navigate to correct page based on server-reported phase
       setPage(data.phase === "playing" ? "game" : "lobby");
@@ -40,7 +40,7 @@ export default function App() {
     const onReconnectError = (err) => {
       // Only clear stored room on definitive session errors
       if (err === "Room not found" || err === "Player not found") {
-        localStorage.removeItem("mindi_room");
+        sessionStorage.removeItem("mindi_room");
       }
     };
 
@@ -48,7 +48,10 @@ export default function App() {
     socket.once("error", onReconnectError);
 
     // FIX: wait for the socket to actually be open before emitting
-    const doEmit = () => socket.emit("reconnect_player", { uid: user.uid, roomCode: mindiRoom });
+    const doEmit = async () => {
+      const token = await user.getIdToken();
+      socket.emit("reconnect_player", { token, roomCode: mindiRoom });
+    };
     if (socket.connected) {
       doEmit();
     } else {
@@ -73,8 +76,8 @@ export default function App() {
 
     // Room ended by leader OR the player was kicked — go to home
     const onRoomEnded = () => {
-      localStorage.removeItem("mindi_room");
-      localStorage.removeItem("mindi_leader");
+      sessionStorage.removeItem("mindi_room");
+      sessionStorage.removeItem("mindi_leader");
       socket.disconnect();
       setSession(null);
       setGameStartData(null);
@@ -93,8 +96,8 @@ export default function App() {
 
   const handleJoined = (data) => {
     setSession(data);
-    localStorage.setItem("mindi_room", data.roomCode);
-    localStorage.setItem("mindi_leader", String(data.isLeader));
+    sessionStorage.setItem("mindi_room", data.roomCode);
+    sessionStorage.setItem("mindi_leader", String(data.isLeader));
     setPage("lobby");
   };
 
@@ -113,8 +116,8 @@ export default function App() {
   };
 
   const handleGoHome = () => {
-    localStorage.removeItem("mindi_room");
-    localStorage.removeItem("mindi_leader");
+    sessionStorage.removeItem("mindi_room");
+    sessionStorage.removeItem("mindi_leader");
     socket.disconnect();
     setSession(null);
     setGameStartData(null);

@@ -59,7 +59,7 @@ export default function Lobby({ session, onGameStart, onGoHome }) {
   };
 
   const handleLeaveRoom = () => {
-    socket.emit("leave_room", { roomCode: session.roomCode, uid: auth.currentUser?.uid });
+    socket.emit("leave_room", { roomCode: session.roomCode });
     if (onGoHome) onGoHome();
   };
 

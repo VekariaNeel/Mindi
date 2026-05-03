@@ -188,7 +188,7 @@ export default function Game({ session, playerNames, onGameOver, onGoHome }) {
   };
 
   const handleLeaveGame = () => {
-    socket.emit("leave_room", { roomCode: session.roomCode, uid: auth.currentUser?.uid });
+    socket.emit("leave_room", { roomCode: session.roomCode });
     if (onGoHome) onGoHome();
   };
 

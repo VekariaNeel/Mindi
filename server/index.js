@@ -3,6 +3,11 @@ const express = require("express");
 const { createServer } = require("http");
 const { Server } = require("socket.io");
 const cors = require("cors");
+const admin = require("firebase-admin");
+
+admin.initializeApp({
+  projectId: process.env.FIREBASE_PROJECT_ID || "mindi-d0bb7",
+});
 
 const {
   initGame, processPlay, getCurrentTurn, getLegalCards,
@@ -23,6 +28,18 @@ const rooms = {};
 
 // ── HEALTH ────────────────────────────────────────────────────
 app.get("/health", (_, res) => res.json({ ok: true }));
+
+// ── AUTHENTICATION ────────────────────────────────────────────
+async function verifyToken(token) {
+  if (!token) return null;
+  try {
+    const decoded = await admin.auth().verifyIdToken(token);
+    return decoded.uid;
+  } catch (error) {
+    console.error("Token verification failed:", error.message);
+    return null;
+  }
+}
 
 // ── HELPERS ───────────────────────────────────────────────────
 function generateCode() {
@@ -141,14 +158,37 @@ function playBotTurn(roomCode) {
   }, 1000);
 }
 
+// ── RATE LIMITING ─────────────────────────────────────────────
+const rateLimits = new Map();
+const RATE_LIMIT_WINDOW_MS = 1000;
+const MAX_EVENTS_PER_WINDOW = 20;
+
+io.use((socket, next) => {
+  socket.use(([event, ...args], nextEvent) => {
+    const now = Date.now();
+    let record = rateLimits.get(socket.id);
+    if (!record || now - record.startTime > RATE_LIMIT_WINDOW_MS) {
+      record = { startTime: now, count: 0 };
+      rateLimits.set(socket.id, record);
+    }
+    record.count++;
+    if (record.count > MAX_EVENTS_PER_WINDOW) {
+      return nextEvent(new Error("Rate limit exceeded"));
+    }
+    nextEvent();
+  });
+  next();
+});
+
 // ── SOCKET EVENTS ─────────────────────────────────────────────
 io.on("connection", (socket) => {
   console.log("Connected:", socket.id);
 
   // ── CREATE ROOM ──────────────────────────────────────────────
-  socket.on("create_room", ({ uid, name, playerLimit }) => {
+  socket.on("create_room", async ({ token, name, playerLimit }) => {
     const n = parseInt(playerLimit);
     if (!name?.trim()) return socket.emit("error", "Enter your name");
+    const uid = await verifyToken(token);
     if (!uid) return socket.emit("error", "Not authenticated");
     if (!n || n < 4 || n % 2 !== 0) return socket.emit("error", "Invalid player count");
 
@@ -178,9 +218,10 @@ io.on("connection", (socket) => {
   });
 
   // ── JOIN ROOM ────────────────────────────────────────────────
-  socket.on("join_room", ({ uid, roomCode, name }) => {
+  socket.on("join_room", async ({ token, roomCode, name }) => {
     if (!name?.trim()) return socket.emit("error", "Enter your name");
     if (!roomCode?.trim()) return socket.emit("error", "Enter room code");
+    const uid = await verifyToken(token);
     if (!uid) return socket.emit("error", "Not authenticated");
 
     const code = roomCode.trim().toUpperCase();
@@ -220,8 +261,10 @@ io.on("connection", (socket) => {
   });
 
   // ── JOIN AS SPECTATOR ────────────────────────────────────────
-  socket.on("join_spectator", ({ roomCode, name }) => {
+  socket.on("join_spectator", async ({ roomCode, name, token }) => {
     if (!roomCode?.trim()) return socket.emit("error", "Enter room code");
+    const uid = await verifyToken(token);
+    if (!uid) return socket.emit("error", "Not authenticated");
 
     const code = roomCode.trim().toUpperCase();
     const room = rooms[code];
@@ -242,8 +285,10 @@ io.on("connection", (socket) => {
   });
 
   // ── RECONNECT ────────────────────────────────────────────────
-  socket.on("reconnect_player", ({ uid, roomCode }) => {
-    if (!uid || !roomCode) return socket.emit("error", "Missing uid or room");
+  socket.on("reconnect_player", async ({ token, roomCode }) => {
+    if (!token || !roomCode) return socket.emit("error", "Missing token or room");
+    const uid = await verifyToken(token);
+    if (!uid) return socket.emit("error", "Not authenticated");
 
     const code = roomCode.trim().toUpperCase();
     const room = rooms[code];
@@ -300,11 +345,12 @@ io.on("connection", (socket) => {
   });
 
   // ── LEAVE ROOM ───────────────────────────────────────────────
-  socket.on("leave_room", ({ roomCode, uid }) => {
+  socket.on("leave_room", ({ roomCode }) => {
     const room = rooms[roomCode];
     if (!room) return;
-    const player = room.players[uid];
+    const player = Object.values(room.players).find(p => p.socketId === socket.id);
     if (!player) return;
+    const uid = player.id;
 
     socket.leave(roomCode);
     
@@ -498,6 +544,7 @@ io.on("connection", (socket) => {
   // ── DISCONNECT ───────────────────────────────────────────────
   socket.on("disconnect", () => {
     console.log("Disconnected:", socket.id);
+    rateLimits.delete(socket.id);
     for (const room of Object.values(rooms)) {
       if (room.spectators[socket.id]) {
         delete room.spectators[socket.id];
