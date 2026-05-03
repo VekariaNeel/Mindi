@@ -66,7 +66,7 @@ export default function Home({ user, onJoined }) {
       },
       (msg) => { setLoading(false); setError(msg); }
     );
-    socket.emit("create_room", { uid: currentUser.uid, name: currentUser.displayName, playerLimit });
+    socket.emit("create_room", { token: await currentUser.getIdToken(), name: currentUser.displayName, playerLimit });
   };
 
   const handleJoin = async () => {
@@ -83,7 +83,7 @@ export default function Home({ user, onJoined }) {
       },
       (msg) => { setLoading(false); setError(msg); }
     );
-    socket.emit("join_room", { uid: currentUser.uid, roomCode: roomCode.trim().toUpperCase(), name: currentUser.displayName });
+    socket.emit("join_room", { token: await currentUser.getIdToken(), roomCode: roomCode.trim().toUpperCase(), name: currentUser.displayName });
   };
 
   const handleSpectate = async () => {
@@ -100,7 +100,7 @@ export default function Home({ user, onJoined }) {
       },
       (msg) => { setLoading(false); setError(msg); }
     );
-    socket.emit("join_spectator", { roomCode: roomCode.trim().toUpperCase(), name: currentUser.displayName });
+    socket.emit("join_spectator", { token: await currentUser.getIdToken(), roomCode: roomCode.trim().toUpperCase(), name: currentUser.displayName });
   };
 
   return (
