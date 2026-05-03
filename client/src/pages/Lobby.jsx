@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef } from "react";
 import socket from "../socket";
+import { auth } from "../firebase";
 
-export default function Lobby({ session, onGameStart }) {
+export default function Lobby({ session, onGameStart, onGoHome }) {
   const [lobbyState, setLobbyState] = useState(null);
   const [selected, setSelected] = useState([]);
   const [chatMsg, setChatMsg] = useState("");
@@ -57,6 +58,15 @@ export default function Lobby({ session, onGameStart }) {
     setChatMsg("");
   };
 
+  const handleLeaveRoom = () => {
+    socket.emit("leave_room", { roomCode: session.roomCode });
+    if (onGoHome) onGoHome();
+  };
+
+  const handleKick = (pid) => {
+    socket.emit("kick_player", { roomCode: session.roomCode, targetId: pid });
+  };
+
   if (!lobbyState) return <div className="loading-screen">Connecting...</div>;
 
   const players = lobbyState.players || [];
@@ -83,6 +93,9 @@ export default function Lobby({ session, onGameStart }) {
               End Room
             </button>
           )}
+          <button className="lobby-end-room-btn" style={{background: "transparent", color: "var(--red)", borderColor: "var(--red)"}} onClick={handleLeaveRoom}>
+              Leave Room
+          </button>
         </div>
       </div>
 
@@ -113,9 +126,14 @@ export default function Lobby({ session, onGameStart }) {
                 {p.name} {p.isLeader?"👑":""}
                 {!p.connected && <span className="offline-dot">• offline</span>}
               </div>
-              {p.team
-                ? <span className={`lobby-team-badge team-${p.team.toLowerCase()}`}>Team {p.team}</span>
-                : <span className="lobby-unassigned">Unassigned</span>}
+              <div style={{display: "flex", gap: "10px", alignItems: "center"}}>
+                {session.isLeader && p.id !== auth.currentUser?.uid && (
+                  <button className="kick-btn" onClick={() => handleKick(p.id)} style={{fontSize:"12px", background:"transparent", color:"var(--red)", border:"1px solid var(--red)", borderRadius:"4px", padding:"2px 6px"}}>Kick</button>
+                )}
+                {p.team
+                  ? <span className={`lobby-team-badge team-${p.team.toLowerCase()}`}>Team {p.team}</span>
+                  : <span className="lobby-unassigned">Unassigned</span>}
+              </div>
             </div>
           ))}
           {Array.from({length: lobbyState.playerLimit - players.length}).map((_,i) => (
