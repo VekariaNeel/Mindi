@@ -1,6 +1,14 @@
+import { auth } from "../firebase";
+import socket from "../socket";
+
 export default function Results({ result, session, onPlayAgain, onGoHome }) {
   if (!result) return null;
   const { winner, tens, tricks, forcedEnd } = result;
+
+  const handleLeaveRoom = () => {
+    socket.emit("leave_room", { roomCode: session.roomCode, uid: auth.currentUser?.uid });
+    if (onGoHome) onGoHome();
+  };
 
   return (
     <div className="results-page">
@@ -31,7 +39,7 @@ export default function Results({ result, session, onPlayAgain, onGoHome }) {
           {!session.isLeader && session.role !== "spectator" && (
             <div className="results-wait-msg">Waiting for leader to start next game...</div>
           )}
-          <button className="results-secondary-btn" onClick={onGoHome}>
+          <button className="results-secondary-btn" onClick={handleLeaveRoom}>
             {session.role==="spectator" ? "Go Home" : "Leave Room"}
           </button>
         </div>

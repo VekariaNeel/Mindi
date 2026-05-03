@@ -4,6 +4,8 @@ import Home from "./pages/Home";
 import Lobby from "./pages/Lobby";
 import Game from "./pages/Game";
 import Results from "./pages/Results";
+import { auth } from "./firebase";
+import { onAuthStateChanged } from "firebase/auth";
 import "./index.css";
 
 export default function App() {
@@ -11,59 +13,91 @@ export default function App() {
   const [session, setSession] = useState(null);
   const [gameStartData, setGameStartData] = useState(null);
   const [gameResult, setGameResult] = useState(null);
+  const [user, setUser] = useState(null);
+  const [authLoaded, setAuthLoaded] = useState(false);
 
-  // Auto-fill room code from URL ?join=XXXXX
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const joinCode = params.get("join");
-    if (joinCode) sessionStorage.setItem("mindi_autojoin", joinCode);
+    const unsub = onAuthStateChanged(auth, (u) => {
+      setUser(u);
+      setAuthLoaded(true);
+    });
+    return unsub;
   }, []);
 
-  // Reconnect on reload
+  // Reconnect on reload — only fires when auth is ready and there's a saved room
   useEffect(() => {
-    const token = localStorage.getItem("mindi_token");
-    if (!token) return;
-    socket.once("reconnected", (data) => {
-      const name = localStorage.getItem("mindi_name") || "Player";
-      const isLeader = localStorage.getItem("mindi_leader") === "true";
-      setSession({ ...data, name, isLeader, role: "player" });
-      setPage("lobby");
-    });
-    socket.once("error", () => localStorage.removeItem("mindi_token"));
-    socket.connect();
-    socket.once("connect", () => {
-      socket.emit("reconnect_player", { token });
-    });
-  }, []);
+    if (!authLoaded || !user) return;
+    const mindiRoom = sessionStorage.getItem("mindi_room");
+    if (!mindiRoom) return;
 
-  // Return to lobby after play again
+    const onReconnected = (data) => {
+      const isLeader = sessionStorage.getItem("mindi_leader") === "true";
+      setSession({ ...data, name: user.displayName, isLeader, role: "player" });
+      // Navigate to correct page based on server-reported phase
+      setPage(data.phase === "playing" ? "game" : "lobby");
+    };
+
+    const onReconnectError = (err) => {
+      // Only clear stored room on definitive session errors
+      if (err === "Room not found" || err === "Player not found") {
+        sessionStorage.removeItem("mindi_room");
+      }
+    };
+
+    socket.once("reconnected", onReconnected);
+    socket.once("error", onReconnectError);
+
+    // FIX: wait for the socket to actually be open before emitting
+    const doEmit = async () => {
+      const token = await user.getIdToken();
+      socket.emit("reconnect_player", { token, roomCode: mindiRoom });
+    };
+    if (socket.connected) {
+      doEmit();
+    } else {
+      socket.once("connect", doEmit);
+      socket.connect();
+    }
+
+    return () => {
+      socket.off("reconnected", onReconnected);
+      socket.off("error", onReconnectError);
+      socket.off("connect", doEmit);
+    };
+  }, [authLoaded, user]);
+
+  // Global socket event listeners
   useEffect(() => {
-    socket.on("return_to_lobby", () => {
+    const onReturnToLobby = () => {
       setGameResult(null);
       setGameStartData(null);
       setPage("lobby");
-    });
-    // Room ended by leader — kick everyone home
-    socket.on("room_ended", () => {
-      localStorage.removeItem("mindi_token");
-      localStorage.removeItem("mindi_name");
-      localStorage.removeItem("mindi_leader");
+    };
+
+    // Room ended by leader OR the player was kicked — go to home
+    const onRoomEnded = () => {
+      sessionStorage.removeItem("mindi_room");
+      sessionStorage.removeItem("mindi_leader");
       socket.disconnect();
       setSession(null);
       setGameStartData(null);
       setGameResult(null);
       setPage("home");
-    });
+    };
+
+    socket.on("return_to_lobby", onReturnToLobby);
+    socket.on("room_ended", onRoomEnded);
+
     return () => {
-      socket.off("return_to_lobby");
-      socket.off("room_ended");
+      socket.off("return_to_lobby", onReturnToLobby);
+      socket.off("room_ended", onRoomEnded);
     };
   }, []);
 
   const handleJoined = (data) => {
     setSession(data);
-    localStorage.setItem("mindi_name", data.name);
-    localStorage.setItem("mindi_leader", String(data.isLeader));
+    sessionStorage.setItem("mindi_room", data.roomCode);
+    sessionStorage.setItem("mindi_leader", String(data.isLeader));
     setPage("lobby");
   };
 
@@ -82,9 +116,8 @@ export default function App() {
   };
 
   const handleGoHome = () => {
-    localStorage.removeItem("mindi_token");
-    localStorage.removeItem("mindi_name");
-    localStorage.removeItem("mindi_leader");
+    sessionStorage.removeItem("mindi_room");
+    sessionStorage.removeItem("mindi_leader");
     socket.disconnect();
     setSession(null);
     setGameStartData(null);
@@ -92,8 +125,10 @@ export default function App() {
     setPage("home");
   };
 
-  if (page === "home")    return <Home onJoined={handleJoined} />;
-  if (page === "lobby")   return <Lobby session={session} onGameStart={handleGameStart} />;
-  if (page === "game")    return <Game session={session} playerNames={gameStartData?.playerNames || {}} onGameOver={handleGameOver} />;
+  if (!authLoaded) return <div className="home-page"><div className="home-card">Loading...</div></div>;
+
+  if (page === "home")    return <Home user={user} onJoined={handleJoined} />;
+  if (page === "lobby")   return <Lobby session={session} onGameStart={handleGameStart} onGoHome={handleGoHome} />;
+  if (page === "game")    return <Game session={session} playerNames={gameStartData?.playerNames || {}} onGameOver={handleGameOver} onGoHome={handleGoHome} />;
   if (page === "results") return <Results result={gameResult} session={session} onPlayAgain={handlePlayAgain} onGoHome={handleGoHome} />;
 }
