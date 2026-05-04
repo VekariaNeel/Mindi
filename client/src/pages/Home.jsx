@@ -1,23 +1,23 @@
 import { useState, useEffect } from "react";
 import socket from "../socket";
+import { auth, googleProvider } from "../firebase";
+import { signInWithPopup } from "firebase/auth";
 
-export default function Home({ onJoined }) {
-  const [tab, setTab]               = useState("create");
-  const [name, setName]             = useState("");
-  const [roomCode, setRoomCode]     = useState("");
-  const [playerLimit, setPlayerLimit] = useState(4);
-  const [spectatorName, setSpectatorName] = useState("");
-  const [error, setError]           = useState("");
-  const [showRules, setShowRules]   = useState(false);
-  const [loading, setLoading]       = useState(false);
+export default function Home({ user, onJoined }) {
+  const [tab, setTab]           = useState("create");
+  const [roomCode, setRoomCode] = useState("");
+  const [error, setError]       = useState("");
+  const [showRules, setShowRules] = useState(false);
+  const [loading, setLoading]   = useState(false);
 
   // Auto-fill room code + switch to join tab if opened via invite link
   useEffect(() => {
-    const autoJoin = sessionStorage.getItem("mindi_autojoin");
-    if (autoJoin) {
-      setRoomCode(autoJoin.toUpperCase());
+    const params = new URLSearchParams(window.location.search);
+    const joinCode = params.get("join");
+    if (joinCode) {
+      setRoomCode(joinCode.toUpperCase());
       setTab("join");
-      sessionStorage.removeItem("mindi_autojoin");
+      window.history.replaceState({}, document.title, window.location.pathname);
     }
   }, []);
 
@@ -27,50 +27,79 @@ export default function Home({ onJoined }) {
     socket.connect();
   });
 
-  const handleCreate = async () => {
-    if (!name.trim()) return setError("Enter your name");
-    setError(""); setLoading(true);
-    await connect();
+  const withSocketAction = (successEvent, onSuccess, onErr) => {
+    const cleanup = () => {
+      socket.off(successEvent, handleSuccess);
+      socket.off("error", handleError);
+    };
+    const handleSuccess = (data) => { cleanup(); onSuccess(data); };
+    const handleError   = (msg)  => { cleanup(); onErr(msg); };
+    socket.on(successEvent, handleSuccess);
+    socket.on("error", handleError);
+    return cleanup;
+  };
 
-    socket.once("room_created", (data) => {
-      setLoading(false);
-      localStorage.setItem("mindi_token", data.token);
-      localStorage.setItem("mindi_name", name.trim());
-      localStorage.setItem("mindi_leader", "true");
-      onJoined({ ...data, name: name.trim(), isLeader: true, role: "player" });
-    });
-    socket.once("error", (msg) => { setLoading(false); setError(msg); });
-    socket.emit("create_room", { name: name.trim(), playerLimit });
+  const handleGoogleSignIn = async () => {
+    if (user) return user;
+    try {
+      const result = await signInWithPopup(auth, googleProvider);
+      return result.user;
+    } catch (err) {
+      setError("Failed to sign in with Google.");
+      return null;
+    }
+  };
+
+  // ── CREATE: sign in then instantly create room with defaults ──
+  const handleCreate = async () => {
+    setError(""); setLoading(true);
+    const currentUser = await handleGoogleSignIn();
+    if (!currentUser) { setLoading(false); return; }
+
+    await connect();
+    withSocketAction("room_created",
+      (data) => {
+        setLoading(false);
+        onJoined({ ...data, name: currentUser.displayName, isLeader: true, role: "player" });
+      },
+      (msg) => { setLoading(false); setError(msg); }
+    );
+    // No playerLimit sent — server defaults to 4, leader changes it in lobby
+    socket.emit("create_room", { token: await currentUser.getIdToken(), name: currentUser.displayName });
   };
 
   const handleJoin = async () => {
-    if (!name.trim()) return setError("Enter your name");
     if (!roomCode.trim()) return setError("Enter room code");
     setError(""); setLoading(true);
-    await connect();
+    const currentUser = await handleGoogleSignIn();
+    if (!currentUser) { setLoading(false); return; }
 
-    socket.once("room_joined", (data) => {
-      setLoading(false);
-      localStorage.setItem("mindi_token", data.token);
-      localStorage.setItem("mindi_name", name.trim());
-      localStorage.setItem("mindi_leader", "false");
-      onJoined({ ...data, name: name.trim(), isLeader: false, role: "player" });
-    });
-    socket.once("error", (msg) => { setLoading(false); setError(msg); });
-    socket.emit("join_room", { roomCode: roomCode.trim().toUpperCase(), name: name.trim() });
+    await connect();
+    withSocketAction("room_joined",
+      (data) => {
+        setLoading(false);
+        onJoined({ ...data, name: currentUser.displayName, isLeader: false, role: "player" });
+      },
+      (msg) => { setLoading(false); setError(msg); }
+    );
+    socket.emit("join_room", { token: await currentUser.getIdToken(), roomCode: roomCode.trim().toUpperCase(), name: currentUser.displayName });
   };
 
   const handleSpectate = async () => {
     if (!roomCode.trim()) return setError("Enter room code");
     setError(""); setLoading(true);
-    await connect();
+    const currentUser = await handleGoogleSignIn();
+    if (!currentUser) { setLoading(false); return; }
 
-    socket.once("spectator_joined", (data) => {
-      setLoading(false);
-      onJoined({ ...data, name: spectatorName.trim() || "Spectator", isLeader: false, role: "spectator" });
-    });
-    socket.once("error", (msg) => { setLoading(false); setError(msg); });
-    socket.emit("join_spectator", { roomCode: roomCode.trim().toUpperCase(), name: spectatorName.trim() || "Spectator" });
+    await connect();
+    withSocketAction("spectator_joined",
+      (data) => {
+        setLoading(false);
+        onJoined({ ...data, name: currentUser.displayName, isLeader: false, role: "spectator" });
+      },
+      (msg) => { setLoading(false); setError(msg); }
+    );
+    socket.emit("join_spectator", { token: await currentUser.getIdToken(), roomCode: roomCode.trim().toUpperCase(), name: currentUser.displayName });
   };
 
   return (
@@ -85,37 +114,27 @@ export default function Home({ onJoined }) {
           {["create","join","spectate"].map(t => (
             <button key={t} className={`home-tab${tab===t?" active":""}`}
               onClick={() => { setTab(t); setError(""); }}>
-              {t==="create"?"Create Room":t==="join"?"Join Room":"Spectate"}
+              {t==="create"?"Host a Game":t==="join"?"Join Room":"Spectate"}
             </button>
           ))}
         </div>
 
         {tab==="create" && <>
-          <div className="home-field">
-            <label className="home-label">Your Name</label>
-            <input className="home-input" placeholder="e.g. Rahul" value={name}
-              onChange={e=>setName(e.target.value)} onKeyDown={e=>e.key==="Enter"&&handleCreate()} />
-          </div>
-          <div className="home-field">
-            <label className="home-label">Number of Players</label>
-            <div className="player-limit-grid">
-              {[4,6,8,10,12].map(n=>(
-                <button key={n} className={`limit-btn${playerLimit===n?" selected":""}`}
-                  onClick={()=>setPlayerLimit(n)}>{n}</button>
-              ))}
+          {user && <div className="home-field"><div className="home-label">Signed in as: {user.displayName}</div></div>}
+          <div className="home-create-info">
+            <span className="home-create-icon">🎲</span>
+            <div>
+              <div className="home-create-title">Create a Private Room</div>
+              <div className="home-create-sub">Configure players & decks once you're in the lobby</div>
             </div>
           </div>
           <button className="home-btn" onClick={handleCreate} disabled={loading}>
-            {loading ? "Connecting..." : "Create Room →"}
+            {loading ? "Creating..." : (user ? "Host a Game →" : "Sign in with Google & Host →")}
           </button>
         </>}
 
         {tab==="join" && <>
-          <div className="home-field">
-            <label className="home-label">Your Name</label>
-            <input className="home-input" placeholder="e.g. Rahul" value={name}
-              onChange={e=>setName(e.target.value)} />
-          </div>
+          {user && <div className="home-field"><div className="home-label">Signed in as: {user.displayName}</div></div>}
           <div className="home-field">
             <label className="home-label">Room Code</label>
             <input className="home-input" placeholder="e.g. XK94F" value={roomCode}
@@ -123,23 +142,19 @@ export default function Home({ onJoined }) {
               onKeyDown={e=>e.key==="Enter"&&handleJoin()} maxLength={5} />
           </div>
           <button className="home-btn" onClick={handleJoin} disabled={loading}>
-            {loading ? "Connecting..." : "Join Room →"}
+            {loading ? "Connecting..." : (user ? "Join Room →" : "Sign in with Google & Join Room →")}
           </button>
         </>}
 
         {tab==="spectate" && <>
-          <div className="home-field">
-            <label className="home-label">Your Name (optional)</label>
-            <input className="home-input" placeholder="Spectator" value={spectatorName}
-              onChange={e=>setSpectatorName(e.target.value)} />
-          </div>
+          {user && <div className="home-field"><div className="home-label">Signed in as: {user.displayName}</div></div>}
           <div className="home-field">
             <label className="home-label">Room Code</label>
             <input className="home-input" placeholder="e.g. XK94F" value={roomCode}
               onChange={e=>setRoomCode(e.target.value.toUpperCase())} maxLength={5} />
           </div>
           <button className="home-btn" onClick={handleSpectate} disabled={loading}>
-            {loading ? "Connecting..." : "Watch Game →"}
+            {loading ? "Connecting..." : (user ? "Watch Game →" : "Sign in with Google & Watch Game →")}
           </button>
         </>}
 

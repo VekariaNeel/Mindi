@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import socket from "../socket";
 import Card from "../components/Card";
+import { auth } from "../firebase";
 
 // ── GAME LOGIC (UNTOUCHED) ────────────────────────────────────
 function getLegalCards(hand, currentTrick, hukumRevealed, hukumSuit, hukumJustRevealed=false) {
@@ -17,6 +18,27 @@ function getLegalCards(hand, currentTrick, hukumRevealed, hukumSuit, hukumJustRe
 
 const SUIT_COLOR = { "♥":"#e05c5c","♦":"#e05c5c","♠":"#1a1a2e","♣":"#1a1a2e" };
 const RED_SUITS  = ["♥","♦"];
+const SUIT_ORDER = { "♠":0, "♥":1, "♦":2, "♣":3 };
+const RANK_ORDER = ["2","3","4","5","6","7","8","9","10","J","Q","K","A"];
+
+function sortHand(hand, mode, hukumSuit) {
+  if (mode === "deal" || !hand?.length) return hand;
+  const rankVal = (r) => RANK_ORDER.indexOf(r);
+  if (mode === "rank")  return [...hand].sort((a,b) => rankVal(a.rank) - rankVal(b.rank));
+  if (mode === "suit")  return [...hand].sort((a,b) => {
+    const sd = SUIT_ORDER[a.suit] - SUIT_ORDER[b.suit];
+    return sd !== 0 ? sd : rankVal(a.rank) - rankVal(b.rank);
+  });
+  if (mode === "trump") return [...hand].sort((a,b) => {
+    const aT = hukumSuit && a.suit === hukumSuit ? -1000 : 0;
+    const bT = hukumSuit && b.suit === hukumSuit ? -1000 : 0;
+    const tDiff = aT - bT;
+    if (tDiff !== 0) return tDiff;
+    const sd = SUIT_ORDER[a.suit] - SUIT_ORDER[b.suit];
+    return sd !== 0 ? sd : rankVal(a.rank) - rankVal(b.rank);
+  });
+  return hand;
+}
 
 // ── WON PILE ──────────────────────────────────────────────────
 function WonPile({ cards, teamLabel, teamColor, n }) {
@@ -63,7 +85,7 @@ function WonPile({ cards, teamLabel, teamColor, n }) {
 }
 
 // ── PLAYER SEAT ───────────────────────────────────────────────
-function PlayerSeat({ name, angle, isMe, isCurrentTurn, cardCount, isHukumHolder, hukumRevealed, tableR, isSpectator }) {
+function PlayerSeat({ name, angle, isMe, isCurrentTurn, cardCount, isHukumHolder, hukumRevealed, tableR, isSpectator, isBot }) {
   const RAD  = Math.PI / 180;
   const seatR = tableR + 68;
   const x = Math.cos((angle - 90) * RAD) * seatR;
@@ -74,7 +96,7 @@ function PlayerSeat({ name, angle, isMe, isCurrentTurn, cardCount, isHukumHolder
       style={{ transform: `translate(calc(-50% + ${x}px), calc(-50% + ${y}px))` }}>
       <div className="pseat-name">
         {isCurrentTurn && <span className="pseat-dot" />}
-        <span className="pseat-label">{isMe ? `${name} (You)` : name}</span>
+        <span className="pseat-label">{isMe ? `${name} (You)` : name} {isBot && "🤖"}</span>
         {isHukumHolder && !hukumRevealed && <span className="pseat-hukum">🂠</span>}
       </div>
       {!isMe && !isSpectator && (
@@ -111,8 +133,9 @@ function ChatPanel({ messages, chatMsg, setChatMsg, onSend, chatRef }) {
 }
 
 // ── MAIN GAME ─────────────────────────────────────────────────
-export default function Game({ session, playerNames, onGameOver }) {
+export default function Game({ session, playerNames, onGameOver, onGoHome }) {
   const [gs, setGs]                         = useState(null);
+  const [sortMode, setSortMode]             = useState("deal");
   const [selected, setSelected]             = useState(null);
   const [event, setEvent]                   = useState(null);
   const [paused, setPaused]                 = useState(null);
@@ -123,6 +146,7 @@ export default function Game({ session, playerNames, onGameOver }) {
   const [showEndConfirm, setShowEndConfirm] = useState(false);
   const [chatOpen, setChatOpen]             = useState(false);
   const [unread, setUnread]                 = useState(false);
+  const [bots, setBots]                     = useState({});
   const chatRef      = useRef();
   const countdownRef = useRef();
 
@@ -142,6 +166,11 @@ export default function Game({ session, playerNames, onGameOver }) {
     socket.on("game_state",          s  => { setGs(s); setPaused(null); });
     socket.on("game_event",          ev => { setEvent(ev); setTimeout(() => setEvent(null), 2800); });
     socket.on("hukum_triggered",     ev => showHukumOverlay(ev.hukumCard, ev.nextPlayerName||ev.playerName, ev.hukumSuit));
+    socket.on("lobby_state",         data => {
+      const b = {};
+      (data.players || []).forEach(p => { if (p.isBot) b[p.id] = true; });
+      setBots(b);
+    });
     socket.on("game_paused",         d  => setPaused(d.message));
     socket.on("player_disconnected", d  => setPaused(`Waiting for ${d.playerName} to reconnect...`));
     socket.on("player_reconnected",  d  => {
@@ -156,7 +185,7 @@ export default function Game({ session, playerNames, onGameOver }) {
     });
     return () => {
       ["game_state","game_event","hukum_triggered","game_paused",
-       "player_disconnected","player_reconnected","game_over","chat_message"]
+       "player_disconnected","player_reconnected","game_over","chat_message","lobby_state"]
         .forEach(e => socket.off(e));
       clearInterval(countdownRef.current);
     };
@@ -180,6 +209,11 @@ export default function Game({ session, playerNames, onGameOver }) {
     setChatMsg("");
   };
 
+  const handleLeaveGame = () => {
+    socket.emit("leave_room", { roomCode: session.roomCode });
+    if (onGoHome) onGoHome();
+  };
+
   const formatEvent = ev => {
     if (!ev) return null;
     if (ev.type === "info")           return ev.msg;
@@ -193,6 +227,7 @@ export default function Game({ session, playerNames, onGameOver }) {
   const isSpectator     = session.role === "spectator";
   const isMyTurn        = !isSpectator && gs.currentTurn === session.playerId;
   const myHand          = gs.myHand || [];
+  const sortedHand      = sortHand(myHand, sortMode, gs.hukumSuit);
   const legal           = isMyTurn ? getLegalCards(myHand, gs.currentTrick, gs.hukumRevealed, gs.hukumSuit, gs.hukumJustRevealed) : [];
   const currentTurnName = playerNames?.[gs.currentTurn] || "...";
   const sequence        = gs.sequence || [];
@@ -204,14 +239,30 @@ export default function Game({ session, playerNames, onGameOver }) {
   const angleFor = seqIdx => ((seqIdx - myIdx + n) % n) * (360 / n);
 
   // Hand UI (shared between desktop right panel and mobile bottom panel)
+  const SORT_MODES = [
+    { id:"deal",  label:"As Dealt" },
+    { id:"rank",  label:"By Number" },
+    { id:"suit",  label:"By Suit" },
+    { id:"trump", label:"Trumps First" },
+  ];
+
   const handUI = !isSpectator && (
     <>
       <div className="hand-title">
         {isMyTurn ? "Your Turn — Pick a Card" : "Your Hand"}
         <span className="hand-count">{myHand.length} cards</span>
       </div>
+      <div className="sort-bar">
+        {SORT_MODES.map(m => (
+          <button key={m.id}
+            className={`sort-btn${sortMode===m.id?" active":""}`}
+            onClick={() => setSortMode(m.id)}>
+            {m.label}
+          </button>
+        ))}
+      </div>
       <div className="hand-cards-row">
-        {myHand.map(card => (
+        {sortedHand.map(card => (
           <Card key={card.id} card={card} size="md"
             selected={selected?.id === card.id}
             disabled={!isMyTurn || !legal.find(c => c.id === card.id)}
@@ -274,13 +325,18 @@ export default function Game({ session, playerNames, onGameOver }) {
       {/* ── TOP BAR ── */}
       <div className="game-topbar">
         <span className="game-topbar-title">MINDI</span>
-        {gs.hukumSuit && <span className="hukum-pill">HUKUM: {gs.hukumSuit}</span>}
-        <span className="score-pill team-a">A: {gs.tens?.A||0}🔟 · {gs.tricks?.A||0}T</span>
-        <span className="score-pill team-b">B: {gs.tens?.B||0}🔟 · {gs.tricks?.B||0}T</span>
-        <span className="game-room-code">{session.roomCode}</span>
-        {session.isLeader && (
-          <button className="end-game-btn" onClick={() => setShowEndConfirm(true)}>End Game</button>
-        )}
+        <div className="topbar-scores">
+          <span className="score-pill team-a">A: {gs.tens?.A||0}🔟 · {gs.tricks?.A||0}T</span>
+          <span className="score-pill team-b">B: {gs.tens?.B||0}🔟 · {gs.tricks?.B||0}T</span>
+        </div>
+        <div className="topbar-actions">
+          <span className="game-room-code">{session.roomCode}</span>
+          {/* Leader: End Game only. Non-leader: Leave Game only. */}
+          {session.isLeader
+            ? <button className="end-game-btn" onClick={() => setShowEndConfirm(true)}>End Game</button>
+            : <button className="end-game-btn" style={{background:"transparent",color:"var(--red)",borderColor:"var(--red)"}} onClick={handleLeaveGame}>Leave Game</button>
+          }
+        </div>
       </div>
 
       {paused && <div className="pause-banner">⏸ {paused}</div>}
@@ -298,6 +354,13 @@ export default function Game({ session, playerNames, onGameOver }) {
               style={{ width:TABLE_R*2+16, height:TABLE_R*2+16,
                 position:"absolute", top:"50%", left:"50%",
                 transform:"translate(-50%,-50%)", borderRadius:"50%" }}>
+              {/* Hukum badge on the felt — only shown after reveal */}
+              {gs.hukumRevealed && gs.hukumSuit && (
+                <div className="felt-hukum-badge">
+                  <span className="felt-hukum-label">HUKUM</span>
+                  <span className="felt-hukum-suit">{gs.hukumSuit}</span>
+                </div>
+              )}
               <div className="trick-center">
                 {(gs.currentTrick||[]).length === 0
                   ? <span className="trick-empty-label">—</span>
@@ -324,7 +387,8 @@ export default function Game({ session, playerNames, onGameOver }) {
                 isMe={pid===session.playerId} isCurrentTurn={gs.currentTurn===pid}
                 cardCount={pid===session.playerId ? myHand.length : (gs.handSizes?.[pid]??0)}
                 isHukumHolder={pid===session.playerId && gs.isHukumHolder}
-                hukumRevealed={gs.hukumRevealed} tableR={TABLE_R} isSpectator={isSpectator} />
+                hukumRevealed={gs.hukumRevealed} tableR={TABLE_R} isSpectator={isSpectator}
+                isBot={bots[pid]} />
             ))}
           </div>
 
