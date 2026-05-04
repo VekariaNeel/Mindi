@@ -4,12 +4,11 @@ import { auth, googleProvider } from "../firebase";
 import { signInWithPopup } from "firebase/auth";
 
 export default function Home({ user, onJoined }) {
-  const [tab, setTab]               = useState("create");
-  const [roomCode, setRoomCode]     = useState("");
-  const [playerLimit, setPlayerLimit] = useState(4);
-  const [error, setError]           = useState("");
-  const [showRules, setShowRules]   = useState(false);
-  const [loading, setLoading]       = useState(false);
+  const [tab, setTab]           = useState("create");
+  const [roomCode, setRoomCode] = useState("");
+  const [error, setError]       = useState("");
+  const [showRules, setShowRules] = useState(false);
+  const [loading, setLoading]   = useState(false);
 
   // Auto-fill room code + switch to join tab if opened via invite link
   useEffect(() => {
@@ -28,8 +27,6 @@ export default function Home({ user, onJoined }) {
     socket.connect();
   });
 
-  // Helper: registers success + error handlers, cleans up the other on first response
-  // Prevents stale handlers from previous clicks accumulating and blocking future ones
   const withSocketAction = (successEvent, onSuccess, onErr) => {
     const cleanup = () => {
       socket.off(successEvent, handleSuccess);
@@ -39,7 +36,7 @@ export default function Home({ user, onJoined }) {
     const handleError   = (msg)  => { cleanup(); onErr(msg); };
     socket.on(successEvent, handleSuccess);
     socket.on("error", handleError);
-    return cleanup; // caller can invoke early if needed
+    return cleanup;
   };
 
   const handleGoogleSignIn = async () => {
@@ -53,6 +50,7 @@ export default function Home({ user, onJoined }) {
     }
   };
 
+  // ── CREATE: sign in then instantly create room with defaults ──
   const handleCreate = async () => {
     setError(""); setLoading(true);
     const currentUser = await handleGoogleSignIn();
@@ -66,7 +64,8 @@ export default function Home({ user, onJoined }) {
       },
       (msg) => { setLoading(false); setError(msg); }
     );
-    socket.emit("create_room", { token: await currentUser.getIdToken(), name: currentUser.displayName, playerLimit });
+    // No playerLimit sent — server defaults to 4, leader changes it in lobby
+    socket.emit("create_room", { token: await currentUser.getIdToken(), name: currentUser.displayName });
   };
 
   const handleJoin = async () => {
@@ -115,24 +114,22 @@ export default function Home({ user, onJoined }) {
           {["create","join","spectate"].map(t => (
             <button key={t} className={`home-tab${tab===t?" active":""}`}
               onClick={() => { setTab(t); setError(""); }}>
-              {t==="create"?"Create Room":t==="join"?"Join Room":"Spectate"}
+              {t==="create"?"Host a Game":t==="join"?"Join Room":"Spectate"}
             </button>
           ))}
         </div>
 
         {tab==="create" && <>
           {user && <div className="home-field"><div className="home-label">Signed in as: {user.displayName}</div></div>}
-          <div className="home-field">
-            <label className="home-label">Number of Players</label>
-            <div className="player-limit-grid">
-              {[4,6,8,10,12].map(n=>(
-                <button key={n} className={`limit-btn${playerLimit===n?" selected":""}`}
-                  onClick={()=>setPlayerLimit(n)}>{n}</button>
-              ))}
+          <div className="home-create-info">
+            <span className="home-create-icon">🎲</span>
+            <div>
+              <div className="home-create-title">Create a Private Room</div>
+              <div className="home-create-sub">Configure players & decks once you're in the lobby</div>
             </div>
           </div>
           <button className="home-btn" onClick={handleCreate} disabled={loading}>
-            {loading ? "Connecting..." : (user ? "Create Room →" : "Sign in with Google & Create Room →")}
+            {loading ? "Creating..." : (user ? "Host a Game →" : "Sign in with Google & Host →")}
           </button>
         </>}
 
