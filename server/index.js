@@ -3,11 +3,10 @@ const express = require("express");
 const { createServer } = require("http");
 const { Server } = require("socket.io");
 const cors = require("cors");
-const admin = require("firebase-admin");
+const jwt = require("jsonwebtoken");
+const jwksClient = require("jwks-rsa");
 
-admin.initializeApp({
-  projectId: process.env.FIREBASE_PROJECT_ID || "mindi-d0bb7",
-});
+const FIREBASE_PROJECT_ID = process.env.FIREBASE_PROJECT_ID;
 
 const {
   initGame, processPlay, getCurrentTurn, getLegalCards,
@@ -30,11 +29,34 @@ const rooms = {};
 app.get("/health", (_, res) => res.json({ ok: true }));
 
 // ── AUTHENTICATION ────────────────────────────────────────────
+const keyClient = jwksClient({
+  jwksUri: "https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com",
+  cache: true,
+  cacheMaxEntries: 5,
+  cacheMaxAge: 600000, // 10 minutes
+});
+
+function getSigningKey(header, callback) {
+  keyClient.getSigningKey(header.kid, (err, key) => {
+    if (err) return callback(err);
+    callback(null, key.getPublicKey());
+  });
+}
+
 async function verifyToken(token) {
   if (!token) return null;
   try {
-    const decoded = await admin.auth().verifyIdToken(token);
-    return decoded.uid;
+    const decoded = await new Promise((resolve, reject) => {
+      jwt.verify(token, getSigningKey, {
+        algorithms: ["RS256"],
+        audience: FIREBASE_PROJECT_ID,
+        issuer: `https://securetoken.google.com/${FIREBASE_PROJECT_ID}`,
+      }, (err, decoded) => {
+        if (err) reject(err);
+        else resolve(decoded);
+      });
+    });
+    return decoded.sub; // sub = Firebase uid
   } catch (error) {
     console.error("Token verification failed:", error.message);
     return null;

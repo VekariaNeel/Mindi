@@ -6,7 +6,7 @@ export default function Results({ result, session, onPlayAgain, onGoHome }) {
   const { winner, tens, tricks, forcedEnd } = result;
 
   const handleLeaveRoom = () => {
-    socket.emit("leave_room", { roomCode: session.roomCode, uid: auth.currentUser?.uid });
+    socket.emit("leave_room", { roomCode: session.roomCode });
     if (onGoHome) onGoHome();
   };
 
