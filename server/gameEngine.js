@@ -12,8 +12,7 @@ function buildDecks(numDecks) {
   return cards;
 }
 
-function prepareDeck(n) {
-  const numDecks = Math.floor(n / 4);
+function prepareDeck(n, numDecks) {
   let deck = buildDecks(numDecks);
   const removed = [];
   for (const rank of RANKS) {
@@ -94,10 +93,13 @@ function getLegalCards(hand, currentTrick, hukumRevealed, hukumCard, hukumJustRe
 }
 
 // ── INIT GAME ─────────────────────────────────────────────────
-function initGame(teamA, teamB) {
+function initGame(teamA, teamB, numDecks) {
   const allPlayers = [...teamA, ...teamB];
   const n          = allPlayers.length;
-  const { deck, removed } = prepareDeck(n);
+  // Enforce minimum of floor(n/4) decks
+  const minDecks   = Math.max(1, Math.floor(n / 4));
+  const deckCount  = Math.max(minDecks, numDecks || minDecks);
+  const { deck, removed } = prepareDeck(n, deckCount);
   const shuffled   = shuffle(deck);
   const perPlayer  = shuffled.length / n;
   const sequence   = buildSequence(teamA, teamB);
@@ -122,8 +124,9 @@ function initGame(teamA, teamB) {
     currentTrick: [],
     tens:      { A: 0, B: 0 },
     tricks:    { A: 0, B: 0 },
-    wonCards:  { A: [], B: [] },  // all cards won per team
+    wonCards:  { A: [], B: [] },
     removedCards: removed,
+    numDecks: deckCount,
     lastEvent: null,
     winner:    null,
   };
