@@ -6,7 +6,8 @@ const cors = require("cors");
 const jwt = require("jsonwebtoken");
 const jwksClient = require("jwks-rsa");
 
-const FIREBASE_PROJECT_ID = process.env.FIREBASE_PROJECT_ID;
+const FIREBASE_PROJECT_ID = process.env.FIREBASE_PROJECT_ID || "mindi2";
+console.log(`📡 Auth initialized for Firebase Project: ${FIREBASE_PROJECT_ID}`);
 
 const {
   initGame, processPlay, getCurrentTurn, getLegalCards,
@@ -20,6 +21,11 @@ app.use(express.json());
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
   cors: { origin, methods: ["GET", "POST"] },
+  // Connectivity tuning: detect stale connections quickly
+  pingTimeout: 20000,
+  pingInterval: 25000,
+  // Prevent oversized payload drops
+  maxHttpBufferSize: 1e6,
 });
 
 // ── STATE ─────────────────────────────────────────────────────
@@ -44,7 +50,10 @@ function getSigningKey(header, callback) {
 }
 
 async function verifyToken(token) {
-  if (!token) return null;
+  if (!token) {
+    console.log("❌ Auth Error: No token provided in request");
+    return null;
+  }
   try {
     const decoded = await new Promise((resolve, reject) => {
       jwt.verify(token, getSigningKey, {
@@ -56,9 +65,14 @@ async function verifyToken(token) {
         else resolve(decoded);
       });
     });
+    console.log("✅ Auth Success: User", decoded.sub);
     return decoded.sub; // sub = Firebase uid
   } catch (error) {
-    console.error("Token verification failed:", error.message);
+    console.error("❌ Token verification failed:", error.message);
+    if (error.message.includes("jwt audience invalid")) {
+      console.error(`   Expected audience: ${FIREBASE_PROJECT_ID}`);
+      console.error(`   Check if your VITE_FIREBASE_PROJECT_ID matches the server's Project ID.`);
+    }
     return null;
   }
 }
@@ -114,6 +128,7 @@ function broadcastLobby(roomCode) {
     players: getRoomPlayers(roomCode),
     phase: room.phase,
     playerLimit: room.playerLimit,
+    numDecks: room.numDecks,
     teamA: room.teamA,
     teamB: room.teamB,
     chat: room.chat,
@@ -183,7 +198,7 @@ function playBotTurn(roomCode) {
 // ── RATE LIMITING ─────────────────────────────────────────────
 const rateLimits = new Map();
 const RATE_LIMIT_WINDOW_MS = 1000;
-const MAX_EVENTS_PER_WINDOW = 20;
+const MAX_EVENTS_PER_WINDOW = 30; // raised from 20 — game bursts are legitimate
 
 io.use((socket, next) => {
   socket.use(([event, ...args], nextEvent) => {
@@ -207,18 +222,19 @@ io.on("connection", (socket) => {
   console.log("Connected:", socket.id);
 
   // ── CREATE ROOM ──────────────────────────────────────────────
-  socket.on("create_room", async ({ token, name, playerLimit }) => {
-    const n = parseInt(playerLimit);
+  // No playerLimit required here — defaults to 4. Leader adjusts live in lobby.
+  socket.on("create_room", async ({ token, name }) => {
+    console.log(`📩 Received create_room from: ${name} (Token length: ${token?.length || 0})`);
     if (!name?.trim()) return socket.emit("error", "Enter your name");
     const uid = await verifyToken(token);
     if (!uid) return socket.emit("error", "Not authenticated");
-    if (!n || n < 4 || n % 2 !== 0) return socket.emit("error", "Invalid player count");
 
     const roomCode = generateCode();
     rooms[roomCode] = {
       code: roomCode,
       phase: "lobby",
-      playerLimit: n,
+      playerLimit: 4,   // default — leader can change live in lobby
+      numDecks: 1,       // default — enforced min is floor(n/4) at game start
       leaderId: uid,
       players: {
         [uid]: {
@@ -238,6 +254,43 @@ io.on("connection", (socket) => {
     socket.emit("room_created", { roomCode, playerId: uid });
     broadcastLobby(roomCode);
   });
+
+  // ── UPDATE ROOM CONFIG (leader only, live) ────────────────────
+  socket.on("update_room_config", ({ roomCode, playerLimit, numDecks }) => {
+    const room = getRoom(roomCode);
+    if (!room) return socket.emit("error", "Room not found");
+    if (room.phase !== "lobby") return socket.emit("error", "Cannot change config after game starts");
+
+    const player = Object.values(room.players).find(p => p.socketId === socket.id);
+    if (!player?.isLeader) return socket.emit("error", "Only the host can change room settings");
+
+    const n = parseInt(playerLimit);
+    if (n && (n < 4 || n % 2 !== 0 || n > 20)) return socket.emit("error", "Player count must be even, min 4, max 20");
+
+    const d = parseInt(numDecks);
+    const effectiveN = n || room.playerLimit;
+    const minDecks = Math.max(1, Math.floor(effectiveN / 4));
+    if (d && d < minDecks) return socket.emit("error", `Min decks for ${effectiveN} players is ${minDecks}`);
+
+    if (n) room.playerLimit = n;
+    if (d) room.numDecks   = d;
+
+    // If player limit was lowered below current count, evict excess non-leaders
+    const playerIds = Object.keys(room.players);
+    while (Object.keys(room.players).length > room.playerLimit) {
+      const excess = playerIds.filter(pid => !room.players[pid]?.isLeader).pop();
+      if (!excess) break;
+      const target = room.players[excess];
+      if (target?.socketId) io.to(target.socketId).emit("room_ended", { message: "Room size was reduced. Please rejoin." });
+      delete room.players[excess];
+      room.teamA = room.teamA.filter(id => id !== excess);
+      room.teamB = room.teamB.filter(id => id !== excess);
+    }
+
+    broadcastLobby(roomCode);
+  });
+
+
 
   // ── JOIN ROOM ────────────────────────────────────────────────
   socket.on("join_room", async ({ token, roomCode, name }) => {
@@ -433,7 +486,7 @@ io.on("connection", (socket) => {
       Object.values(room.players).map(p => [p.id, p.name])
     );
 
-    room.game = initGame(room.teamA, room.teamB);
+    room.game = initGame(room.teamA, room.teamB, room.numDecks);
     room.phase = "playing";
 
     io.to(roomCode).emit("game_started", {
@@ -568,26 +621,27 @@ io.on("connection", (socket) => {
     console.log("Disconnected:", socket.id);
     rateLimits.delete(socket.id);
     for (const room of Object.values(rooms)) {
+      // Check spectators first — do NOT return early so player check runs too
       if (room.spectators[socket.id]) {
         delete room.spectators[socket.id];
         broadcastLobby(room.code);
-        return;
+        continue; // move to next room, don't skip player check in this room
       }
       for (const player of Object.values(room.players)) {
         if (player.socketId === socket.id) {
           player.connected = false;
           player.socketId  = null;
-          
+
           if (room.phase === "playing") {
-             player.isBot = true; // mid-game disconnects convert to bots immediately
-             addChatMessage(room.code, "System", `${player.name} disconnected. A Bot is filling in.`);
-             broadcastGameState(room.code);
-             playBotTurn(room.code);
+            player.isBot = true;
+            addChatMessage(room.code, "System", `${player.name} disconnected. A Bot is filling in.`);
+            broadcastGameState(room.code);
+            playBotTurn(room.code);
           } else {
-             io.to(room.code).emit("player_disconnected", { playerName: player.name });
+            io.to(room.code).emit("player_disconnected", { playerName: player.name });
           }
           broadcastLobby(room.code);
-          return;
+          break; // found the player in this room, stop inner loop
         }
       }
     }
